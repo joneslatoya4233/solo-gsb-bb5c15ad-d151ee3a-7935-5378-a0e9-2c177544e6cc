@@ -150,4 +150,206 @@ check('选区不在 root 内时返回 null', () => {
   foreign.remove()
 })
 
+// ---------- 端点落在元素子节点边界（跨多层高亮拖选） ----------
+
+// 模拟 TextView 的真实 DOM：普通段包 span，漏标定位在段内再嵌一层 qs-range mark
+function renderLikeTextView(
+  text: string,
+  anns: Array<[number, number, string]>,
+  quoteRange: [number, number] | null,
+) {
+  const root = doc.getElementById('root') as HTMLElement
+  root.innerHTML = ''
+  const segs = buildSegments(
+    text.length,
+    anns.map(([start, end, id]) => ({ start, end, id })),
+  )
+  const fillSlice = (parent: HTMLElement, seg: { start: number; end: number }) => {
+    if (!quoteRange || seg.end <= quoteRange[0] || seg.start >= quoteRange[1]) {
+      parent.appendChild(doc.createTextNode(text.slice(seg.start, seg.end)))
+      return
+    }
+    const s = Math.max(seg.start, quoteRange[0])
+    const e = Math.min(seg.end, quoteRange[1])
+    parent.appendChild(doc.createTextNode(text.slice(seg.start, s)))
+    const qs = doc.createElement('mark')
+    qs.className = 'qs-range'
+    qs.dataset.start = String(s)
+    qs.dataset.end = String(e)
+    qs.textContent = text.slice(s, e)
+    parent.appendChild(qs)
+    parent.appendChild(doc.createTextNode(text.slice(e, seg.end)))
+  }
+  for (const seg of segs) {
+    if (seg.annotationIds.length === 0) {
+      const span = doc.createElement('span')
+      fillSlice(span, seg)
+      root.appendChild(span)
+    } else {
+      const mark = doc.createElement('mark')
+      mark.dataset.start = String(seg.start)
+      mark.dataset.end = String(seg.end)
+      mark.dataset.ids = seg.annotationIds.join(',')
+      fillSlice(mark, seg)
+      root.appendChild(mark)
+    }
+  }
+  return root
+}
+
+function selectAndRead(root: HTMLElement): { start: number; end: number } {
+  const sel = window.getSelection()!
+  const off = selectionToOffsets(root)
+  assert.ok(off, '选区应能换算成偏移')
+  return off!
+}
+
+check('selectionToOffsets：端点落在高亮 mark 的子节点边界', () => {
+  const text = '开头平平无奇的文字中间【重点】后面又是普通文字结尾。'
+  const mStart = text.indexOf('【重点】')
+  const root = render(text, [[mStart, mStart + 4, 'a']])
+  const mark = root.querySelector('mark')!
+  const sel = window.getSelection()!
+
+  // 正向：从普通文本拖到 mark 结束边界 (mark, 1)
+  let range = doc.createRange()
+  range.setStart(root.firstChild!, 4)
+  range.setEnd(mark, 1)
+  sel.removeAllRanges()
+  sel.addRange(range)
+  let off = selectAndRead(root)
+  assert.strictEqual(off.start, 4)
+  assert.strictEqual(off.end, mStart + 4)
+  assert.strictEqual(text.slice(off.start, off.end), sel.toString())
+
+  // 正向：从 mark 起始边界 (mark, 0) 拖到后面普通文本
+  range = doc.createRange()
+  range.setStart(mark, 0)
+  range.setEnd(root.childNodes[2]!, 3)
+  sel.removeAllRanges()
+  sel.addRange(range)
+  off = selectAndRead(root)
+  assert.strictEqual(off.start, mStart)
+  assert.strictEqual(off.end, text.length - root.childNodes[2]!.textContent!.length + 3)
+  assert.strictEqual(text.slice(off.start, off.end), sel.toString())
+
+  // 端点落在普通段 span 的子节点边界
+  const root2 = renderLikeTextView(text, [[mStart, mStart + 4, 'a']], null)
+  const span = root2.querySelector('span')!
+  range = doc.createRange()
+  range.setStart(span, 1) // span 内文本之后 = 高亮起点
+  range.setEnd(root2.childNodes[2]!.childNodes[0]!, 2)
+  sel.removeAllRanges()
+  sel.addRange(range)
+  off = selectAndRead(root2)
+  assert.strictEqual(off.start, mStart)
+  assert.strictEqual(text.slice(off.start, off.end), sel.toString())
+})
+
+check('selectionToOffsets：端点落在漏标定位内层 qs-range 的子节点边界', () => {
+  const text = '甲乙丙丁戊己庚辛壬癸'.repeat(2) // 20 字
+  // 高亮 [4,12)，漏标定位 [6,10) 嵌在高亮内部
+  const root = renderLikeTextView(text, [[4, 12, 'a']], [6, 10])
+  const qs = root.querySelector('mark.qs-range')!
+  const outer = root.querySelector('mark[data-ids]')!
+  const sel = window.getSelection()!
+
+  // 结构：span(0..4) / mark[data-ids](文本4..6 + qs(6..10) + 文本10..12) / span(12..20)
+  // 起点落在 qs-range 起始边界 (qs, 0)，终点落在外层 mark 的子节点边界 (mark, 2)
+  const range = doc.createRange()
+  range.setStart(qs, 0)
+  range.setEnd(outer, 2)
+  sel.removeAllRanges()
+  sel.addRange(range)
+  const off = selectAndRead(root)
+  assert.strictEqual(off.start, 6)
+  assert.strictEqual(off.end, 10)
+  assert.strictEqual(text.slice(off.start, off.end), sel.toString())
+
+  // 终点落在 qs-range 结束边界 (qs, 1)
+  const range2 = doc.createRange()
+  range2.setStart(root.firstChild!.childNodes[0]!, 2) // 全文偏移 2
+  range2.setEnd(qs, 1)
+  sel.removeAllRanges()
+  sel.addRange(range2)
+  const off2 = selectAndRead(root)
+  assert.strictEqual(off2.start, 2)
+  assert.strictEqual(off2.end, 10)
+  assert.strictEqual(text.slice(off2.start, off2.end), sel.toString())
+})
+
+check('selectionToOffsets：反向拖选与正向得到同一半开区间', () => {
+  const text = '甲乙丙丁戊己庚辛壬癸'.repeat(2)
+  const root = renderLikeTextView(text, [[4, 12, 'a']], [6, 10])
+  const qs = root.querySelector('mark.qs-range')!
+  const sel = window.getSelection()!
+
+  const firstText = root.firstChild!.childNodes[0]! // span 内文本（0..4）
+  const qsText = qs.firstChild! // qs-range 内文本（6..10）
+
+  // 正向：偏移 2 → 8
+  const fwd = doc.createRange()
+  fwd.setStart(firstText, 2)
+  fwd.setEnd(qsText, 2)
+  sel.removeAllRanges()
+  sel.addRange(fwd)
+  const fwdOff = selectAndRead(root)
+  assert.deepStrictEqual(fwdOff, { start: 2, end: 8 })
+
+  // 反向：anchor 在偏移 8、focus 在偏移 2（从右往左拖）
+  sel.removeAllRanges()
+  sel.setBaseAndExtent(qsText, 2, firstText, 2)
+  const backOff = selectAndRead(root)
+  assert.deepStrictEqual(backOff, fwdOff)
+  assert.strictEqual(sel.toString(), text.slice(2, 8))
+
+  // 反向且端点落在元素边界：anchor=(root 末尾文本, 3)，focus=(qs, 0)
+  sel.removeAllRanges()
+  sel.setBaseAndExtent(root.childNodes[2]!.childNodes[0]!, 3, qs, 0)
+  const backOff2 = selectAndRead(root)
+  assert.deepStrictEqual(backOff2, { start: 6, end: 15 })
+  assert.strictEqual(sel.toString(), text.slice(6, 15))
+})
+
+check('selectionToOffsets：根容器边界与全选行为保持不变', () => {
+  const text = '根容器边界的文字'
+  const root = render(text, [[2, 4, 'a']])
+  const range = doc.createRange()
+  range.selectNodeContents(root)
+  const sel = window.getSelection()!
+  sel.removeAllRanges()
+  sel.addRange(range)
+  const off = selectAndRead(root)
+  assert.deepStrictEqual(off, { start: 0, end: text.length })
+
+  // 根容器中间子节点边界：(root, 1) → 第一个子节点之后
+  const markEnd = doc.createRange()
+  markEnd.setStart(root, 1)
+  markEnd.setEnd(root, root.childNodes.length)
+  sel.removeAllRanges()
+  sel.addRange(markEnd)
+  const off2 = selectAndRead(root)
+  assert.strictEqual(off2.start, 2)
+  assert.strictEqual(off2.end, text.length)
+})
+
+check('setSelectionRange / selectionToOffsets：嵌套漏标结构下往返一致', () => {
+  const text = '甲乙丙丁戊己庚辛壬癸'.repeat(2)
+  const root = renderLikeTextView(text, [[4, 12, 'a']], [6, 10])
+  const points = [0, 2, 4, 6, 8, 10, 12, 15, 20]
+  for (const s of points) {
+    for (const e of points) {
+      if (e <= s) continue
+      const ok = setSelectionRange(root, s, e)
+      assert.ok(ok, `设置选区 [${s}, ${e}) 应成功`)
+      const back = selectionToOffsets(root)
+      assert.ok(back, `读回选区 [${s}, ${e}) 应非空`)
+      assert.strictEqual(back!.start, s, `起点往返 [${s}, ${e})`)
+      assert.strictEqual(back!.end, e, `终点往返 [${s}, ${e})`)
+      const sel = window.getSelection()!
+      assert.strictEqual(sel.toString(), text.slice(s, e))
+    }
+  }
+})
+
 console.log(`\n全部 ${passed} 项通过`)

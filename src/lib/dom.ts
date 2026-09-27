@@ -6,34 +6,38 @@ interface OffsetPoint {
 }
 
 /**
- * 计算 node 之前所有文本节点的字符总数。
+ * 计算 node 之前所有文本的字符总数。
  * root 必须是渲染原文的容器；其 textContent 应与原文逐字符一致。
+ * node 为元素时，统计到其内部第一个文本节点为止，即该元素起点之前的长度。
  */
 function textLengthBefore(root: HTMLElement, node: Node): number {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
   let total = 0
   let cur = walker.nextNode()
-  while (cur && cur !== node) {
+  while (cur && cur !== node && !node.contains(cur)) {
     total += (cur.textContent ?? '').length
     cur = walker.nextNode()
   }
   return total
 }
 
-function pointToOffset(root: HTMLElement, point: OffsetPoint): number {
-  if (point.node === root) {
-    // 折叠到子节点边界：offset 是子节点索引
-    let total = 0
-    for (let i = 0; i < Math.min(point.offset, root.childNodes.length); i++) {
-      total += root.childNodes[i].textContent?.length ?? 0
-    }
-    return total
+/** 元素定位点：offset 是子节点索引，累计其前 offset 个子节点的文本长度 */
+function childTextLength(el: Element, offset: number): number {
+  let total = 0
+  for (let i = 0; i < Math.min(offset, el.childNodes.length); i++) {
+    total += el.childNodes[i].textContent?.length ?? 0
   }
+  return total
+}
+
+function pointToOffset(root: HTMLElement, point: OffsetPoint): number {
   if (point.node.nodeType === Node.TEXT_NODE) {
     return textLengthBefore(root, point.node) + point.offset
   }
-  // 落在元素节点上：取该元素之前的长度
-  return textLengthBefore(root, point.node)
+  // 元素节点（根容器、标注高亮、漏标定位内层标记等）：
+  // offset 是子节点索引，在元素起点之前的长度上累计此前子节点的文本
+  const base = point.node === root ? 0 : textLengthBefore(root, point.node)
+  return base + childTextLength(point.node as Element, point.offset)
 }
 
 export interface DomRange {
