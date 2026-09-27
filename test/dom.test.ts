@@ -150,4 +150,157 @@ check('选区不在 root 内时返回 null', () => {
   foreign.remove()
 })
 
+// ---------- 嵌套标记：端点落在元素子节点边界 ----------
+
+/**
+ * 构造 TextView 在「漏标审阅」时会出现的真实结构：
+ * 普通文本 / <mark class=hl> 外层高亮，内部再嵌一个 <mark class=qs-range> / 普通文本。
+ * 文本总长 10：abcdefghij
+ *   root:
+ *     #text "ab"
+ *     mark.hl            (偏移 2..8)
+ *       #text "cd"
+ *       mark.qs-range    (偏移 4..7)
+ *         #text "efg"
+ *       #text "h"
+ *     #text "ij"
+ */
+function renderNested(): HTMLElement {
+  const root = doc.getElementById('root') as HTMLElement
+  root.innerHTML = ''
+  root.appendChild(doc.createTextNode('ab'))
+  const outer = doc.createElement('mark')
+  outer.className = 'hl'
+  outer.dataset.start = '2'
+  outer.dataset.end = '8'
+  outer.appendChild(doc.createTextNode('cd'))
+  const inner = doc.createElement('mark')
+  inner.className = 'qs-range'
+  inner.dataset.start = '4'
+  inner.dataset.end = '7'
+  inner.textContent = 'efg'
+  outer.appendChild(inner)
+  outer.appendChild(doc.createTextNode('h'))
+  root.appendChild(outer)
+  root.appendChild(doc.createTextNode('ij'))
+  return root
+}
+
+function placeRange(
+  sc: Node,
+  so: number,
+  ec: Node,
+  eo: number,
+): Range {
+  const range = doc.createRange()
+  range.setStart(sc, so)
+  range.setEnd(ec, eo)
+  const sel = window.getSelection()!
+  sel.removeAllRanges()
+  sel.addRange(range)
+  return range
+}
+
+check('端点落在外层 / 内层标记子节点边界时偏移不错位', () => {
+  const text = 'abcdefghij'
+  const root = renderNested()
+  const [outer] = root.querySelectorAll('mark.hl')
+  const inner = root.querySelector('mark.qs-range')!
+  const plain = root.lastChild as Text // "ij"
+
+  // 外标记起点边界（sc=outer, so=0）→ 偏移 2；终点在普通文本第 1 字 → 偏移 9
+  const r1 = placeRange(outer, 0, plain, 1)
+  assert.strictEqual(r1.toString(), text.slice(2, 9))
+  let off = selectionToOffsets(root)
+  assert.ok(off, '端点在外标记边界不应导致选区消失')
+  assert.strictEqual(off!.start, 2)
+  assert.strictEqual(off!.end, 9)
+  assert.strictEqual(text.slice(off!.start, off!.end), r1.toString())
+
+  // 两端都落在外层 mark 的子节点边界：外标记起点 → 内层标记之后（h 之前）
+  const r2 = placeRange(outer, 0, outer, 2)
+  assert.strictEqual(r2.toString(), text.slice(2, 7))
+  off = selectionToOffsets(root)
+  assert.ok(off, '选区完全在嵌套标记内不应返回 null')
+  assert.strictEqual(off!.start, 2)
+  assert.strictEqual(off!.end, 7)
+
+  // 端点落在内层 mark 的子节点边界：inner 起点 → inner 末尾
+  const r3 = placeRange(inner, 0, inner, 1)
+  assert.strictEqual(r3.toString(), text.slice(4, 7))
+  off = selectionToOffsets(root)
+  assert.ok(off)
+  assert.strictEqual(off!.start, 4)
+  assert.strictEqual(off!.end, 7)
+
+  // 内层边界 → 外层末尾边界（跨出内层但仍在外层内）
+  const r4 = placeRange(inner, 1, outer, 3)
+  assert.strictEqual(r4.toString(), text.slice(7, 8))
+  off = selectionToOffsets(root)
+  assert.ok(off)
+  assert.strictEqual(off!.start, 7)
+  assert.strictEqual(off!.end, 8)
+})
+
+check('反向拖选（base/extent 与文档序相反）得到同一半开区间', () => {
+  const text = 'abcdefghij'
+  const root = renderNested()
+  const [outer] = root.querySelectorAll('mark.hl')
+  const inner = root.querySelector('mark.qs-range')!
+  const plain = root.lastChild as Text
+  const sel = window.getSelection()!
+  assert.strictEqual(typeof sel.setBaseAndExtent, 'function')
+
+  // 正向：外层起点边界 → 普通文本
+  sel.removeAllRanges()
+  sel.setBaseAndExtent(outer, 0, plain, 1)
+  const forward = selectionToOffsets(root)
+  assert.ok(forward)
+  assert.strictEqual(forward!.start, 2)
+  assert.strictEqual(forward!.end, 9)
+
+  // 反向：从普通文本往回拖到外层起点边界
+  sel.removeAllRanges()
+  sel.setBaseAndExtent(plain, 1, outer, 0)
+  const backward = selectionToOffsets(root)
+  assert.ok(backward, '反向拖选不应消失或得到全文长度')
+  assert.deepStrictEqual(backward, forward)
+  assert.strictEqual(text.slice(backward!.start, backward!.end), text.slice(2, 9))
+
+  // 跨内层标记的反向拖选：内层末尾 → 外标记开头
+  sel.removeAllRanges()
+  sel.setBaseAndExtent(inner, 1, outer, 0)
+  const back2 = selectionToOffsets(root)
+  sel.removeAllRanges()
+  sel.setBaseAndExtent(outer, 0, inner, 1)
+  const fwd2 = selectionToOffsets(root)
+  assert.ok(back2)
+  assert.ok(fwd2)
+  assert.deepStrictEqual(back2, fwd2)
+  assert.strictEqual(fwd2!.start, 2)
+  assert.strictEqual(fwd2!.end, 7)
+})
+
+check('setSelectionRange 设置后读回与浏览器可见选区一致（含嵌套标记）', () => {
+  const text = 'abcdefghij'
+  const root = renderNested()
+  // 2/4/7/8 是外层 / 内层标记边界，10 是全文末尾
+  for (const [s, e] of [
+    [2, 9],
+    [4, 7],
+    [2, 7],
+    [7, 8],
+    [0, 8],
+    [4, 10],
+  ] as const) {
+    const ok = setSelectionRange(root, s, e)
+    assert.ok(ok, `嵌套结构设置选区 [${s}, ${e}) 应成功`)
+    const back = selectionToOffsets(root)
+    assert.ok(back, `嵌套结构读回选区 [${s}, ${e}) 应非空`)
+    assert.strictEqual(back!.start, s, `起点往返 [${s}, ${e})`)
+    assert.strictEqual(back!.end, e, `终点往返 [${s}, ${e})`)
+    assert.strictEqual(window.getSelection()!.toString(), text.slice(s, e))
+  }
+})
+
 console.log(`\n全部 ${passed} 项通过`)

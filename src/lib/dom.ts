@@ -20,9 +20,26 @@ function textLengthBefore(root: HTMLElement, node: Node): number {
   return total
 }
 
+/** 累计 node 之前（文档序）所有文本内容的长度，祖先层逐层按前序兄弟子树累加 */
+function textLengthBeforeNode(root: HTMLElement, node: Node): number {
+  let total = 0
+  let cur: Node = node
+  while (cur !== root) {
+    const parent = cur.parentNode
+    if (!parent || !root.contains(parent)) break
+    for (let i = 0; i < parent.childNodes.length; i++) {
+      const sibling = parent.childNodes[i]
+      if (sibling === cur) break
+      total += sibling.textContent?.length ?? 0
+    }
+    cur = parent
+  }
+  return total
+}
+
 function pointToOffset(root: HTMLElement, point: OffsetPoint): number {
   if (point.node === root) {
-    // 折叠到子节点边界：offset 是子节点索引
+    // 折叠到根容器子节点边界：offset 是子节点索引
     let total = 0
     for (let i = 0; i < Math.min(point.offset, root.childNodes.length); i++) {
       total += root.childNodes[i].textContent?.length ?? 0
@@ -32,8 +49,17 @@ function pointToOffset(root: HTMLElement, point: OffsetPoint): number {
   if (point.node.nodeType === Node.TEXT_NODE) {
     return textLengthBefore(root, point.node) + point.offset
   }
-  // 落在元素节点上：取该元素之前的长度
-  return textLengthBefore(root, point.node)
+  // 落在元素节点上（如端点正好在高亮 / 漏标内层标记的子节点边界）：
+  // 先累计该元素之前的全部文本，再按 offset 累计其前序子节点的文本长度。
+  // 不能只对文本节点做 TreeWalker 匹配——元素本身永远不等于文本节点，
+  // 否则会一路累加至全文长度，造成区间错位、选区消失。
+  const node = point.node as Element
+  let total = textLengthBeforeNode(root, node)
+  const limit = Math.min(point.offset, node.childNodes.length)
+  for (let i = 0; i < limit; i++) {
+    total += node.childNodes[i].textContent?.length ?? 0
+  }
+  return total
 }
 
 export interface DomRange {
